@@ -45,7 +45,7 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
-### Running offline with Ollama (my default setup)
+### Running 100% offline with Ollama (my default setup)
 
 ```bash
 ollama pull qwen2.5-coder:7b
@@ -116,28 +116,31 @@ uvicorn enigma.server.app:app --reload
 
 ### Deploying to Render
 
-1. Push this repo to GitHub.
-2. On [dashboard.render.com](https://dashboard.render.com): New + → Web Service → select the repo.
-3. Build command: `pip install -e ".[server]"`
-4. Start command: `uvicorn enigma.server.app:app --host 0.0.0.0 --port $PORT`
-5. Env vars: `LLM_PROVIDER=gemini`, `GEMINI_API_KEY=<your key>`
+This is how I deployed my own instance, on Render's free tier:
 
-Ollama doesn't work on free hosting — no GPU, no persistent model
-storage — so the deployed version runs on Gemini or OpenAI instead. If
-no key is configured it falls back to a demo mode automatically:
-reproduction and AST analysis still run for real, patch generation is
-just skipped, and the response says so rather than the request silently
-failing.
+I pushed the repo to GitHub, then on [dashboard.render.com](https://dashboard.render.com) hit
+New + → Web Service and pointed it at the repo. For the build command I
+used `pip install -e ".[server]"`, and for the start command
+`uvicorn enigma.server.app:app --host 0.0.0.0 --port $PORT`. Then I set
+two env vars — `LLM_PROVIDER=gemini` and `GEMINI_API_KEY` with my own
+key — and hit deploy.
+
+I went with Gemini for the hosted version instead of Ollama, since Render's
+free tier doesn't give you a GPU or persistent storage for local model
+weights. If you skip the API key entirely, the service still comes up
+fine — it just falls back to demo mode automatically, where reproduction
+and AST analysis still run for real but patch generation gets skipped
+rather than the whole request failing.
 
 ## Sandbox notes
 
 `LocalSandbox` runs with the same interpreter as the host process
-(`sys.executable`) and redacts anything with `KEY`, `TOKEN`, `SECRET`,
-`PASSWORD`, or `CREDENTIAL` in the env var name. It's a blast-radius
-reducer, not a real security boundary — for that, `DockerSandbox` is the
-one that actually matters: `--network none`, memory/CPU/pids caps,
-read-only root filesystem, non-root user, all capabilities dropped.
-Select it with `SANDBOX_BACKEND=docker`.
+(`sys.executable`), and I redact anything with `KEY`, `TOKEN`, `SECRET`,
+`PASSWORD`, or `CREDENTIAL` in the env var name before handing it to the
+subprocess. It's a blast-radius reducer, not a real security boundary —
+`DockerSandbox` is the one I'd actually trust for that: `--network none`,
+memory/CPU/pids caps, read-only root filesystem, non-root user, every
+capability dropped. Flip it on with `SANDBOX_BACKEND=docker`.
 
 ## What I'd tackle next
 
