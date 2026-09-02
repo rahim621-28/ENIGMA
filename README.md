@@ -12,6 +12,13 @@ looping forever when a test keeps failing; here every retry is bounded
 by `max_retries`, with a hard LangGraph `recursion_limit` as a backstop
 even if my retry-counting logic ever has a bug.
 
+**Live demo:** https://enigma-h8gl.onrender.com — running on Render's free
+tier without an LLM API key configured, so it runs in demo mode: real AST
+analysis and real sandboxed reproduction, patch generation skipped. Below
+is a run against the bundled `ZeroDivisionError` scenario:
+
+![ENIGMA demo run](docs/demo-screenshot.png)
+
 ## Architecture
 
 ```
@@ -101,7 +108,6 @@ weight on the aggregate number.
 with a small demo page at `/` so it's explorable in a browser.
 
 **Endpoints:**
-
 - `GET /healthz` — liveness check
 - `GET /` — demo UI
 - `POST /triage` — `{"log": str, "repo_url": Optional[str]}` → runs the
