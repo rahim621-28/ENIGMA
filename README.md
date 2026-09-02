@@ -3,9 +3,9 @@
 Autonomous incident-triage agent: crash log → AST analysis → sandboxed
 reproduction → LLM-synthesized patch → test verification → RCA report.
 
-Built as a deterministic **LangGraph** state machine (not a free-form
-ReAct loop), so it doesn't hallucinate its way into an infinite retry
-loop — every retry is bounded by `max_retries` and a hard LangGraph
+Built as a deterministic **LangGraph** state machine rather than a
+free-form ReAct loop, so it can't hallucinate its way into an infinite
+retry loop — every retry is bounded by `max_retries` and a hard LangGraph
 `recursion_limit` backstop.
 
 ## Architecture
@@ -24,10 +24,10 @@ Crash Log ──► Ingest ──► AST + Git Blame ──► Hypothesis ──
 - **Sandbox**: `LocalSandbox` (subprocess isolation, stripped-secrets env,
   hard timeout) for fast local dev, and `DockerSandbox`
   (`--network none`, memory/CPU/pids caps, non-root, `--cap-drop ALL`) for
-  actual adversarial isolation of LLM-generated code.
+  adversarial isolation of LLM-generated code.
 - **LLM providers**: Ollama (local, offline, default), Gemini, OpenAI, and
   a deterministic `mock` provider used by the eval harness to validate
-  pipeline plumbing without requiring a live model.
+  pipeline wiring without requiring a live model.
 
 ## Setup
 
@@ -73,52 +73,59 @@ ZeroDivisionError: division by zero' \
 enigma eval
 ```
 
-**What the eval number means — read this before putting it on a resume:**
+The harness has two modes:
 
-- With `LLM_PROVIDER=mock` (no key/daemon needed), the harness applies each
-  scenario's known-good fixture patch instead of asking a model to
-  synthesize one. This validates that ingest → AST → sandbox repro →
-  patch-apply → test → RCA all wire together correctly. It is a **pipeline
-  plumbing check**, not a claim about model reasoning quality. The CLI
-  prints this caveat directly in the report — don't strip it out when you
-  screenshot the table.
-- With `LLM_PROVIDER=ollama` (or `gemini`/`openai`), the agent generates
-  its own patch and that patch is what gets tested. That number is real,
-  but it's currently measured against **4 small, hand-written scenarios**
-  (`evals/scenarios/`), not SWE-bench itself. Report it as "4/4 on our
-  hand-written regression scenarios," not as a bare percentage — a bare
-  "100%" figure with no N attached is the single most common way this kind
-  of project loses credibility in an interview.
+- `LLM_PROVIDER=mock` applies each scenario's known-good fixture patch
+  instead of asking a model to generate one. It's a wiring check —
+  confirms ingest → AST → sandbox repro → patch-apply → test → RCA all
+  connect correctly — not a measure of model reasoning.
+- `LLM_PROVIDER=ollama` (or `gemini`/`openai`) has the agent generate its
+  own patch, which is then applied and tested for real. Currently run
+  against 4 hand-written scenarios in `evals/scenarios/`, covering
+  `ZeroDivisionError`, `KeyError`, `IndexError`, and `TypeError` patterns.
+  Pass@1 on qwen2.5-coder:7b is currently 2/4 — the model correctly fixes
+  `IndexError` and `TypeError` cases but struggles with the `KeyError`
+  and `ZeroDivisionError` scenarios (see Known limitations below).
 
-To get a defensible number for a resume, the honest next step is adding
-more scenarios (10-20+) covering a range of bug classes and difficulty, and
-reporting Pass@1 against that larger, still-disclosed N.
+Planned next step: expand the scenario set to 15-20+ cases spanning a
+wider range of bug classes and difficulty levels.
 
 ## Sandbox isolation notes
 
-`LocalSandbox` copies the repo into a temp dir and runs with the **same
-interpreter** as the host process (`sys.executable`), with secret-looking
+`LocalSandbox` copies the repo into a temp dir and runs with the same
+interpreter as the host process (`sys.executable`), with secret-looking
 env vars (`*KEY*`, `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*CREDENTIAL*`)
-redacted. This is a blast-radius reducer against buggy generated code, not
+redacted. This reduces blast radius from buggy generated code; it is not
 an adversarial security boundary.
 
-`DockerSandbox` is the actual isolation layer: `--network none`, memory/CPU/
+`DockerSandbox` is the real isolation layer: `--network none`, memory/CPU/
 pids limits, read-only root filesystem with a tmpfs scratch dir, non-root
 user, and all Linux capabilities dropped. Requires Docker; select it with
 `SANDBOX_BACKEND=docker`.
 
-## Known limitations (be ready to name these in an interview)
+## Known limitations
 
 - `_build_repro_script` re-runs the whole failing module rather than
-  parsing the traceback's call chain into a minimal repro — fine for the
+  parsing the traceback's call chain into a minimal repro — works for the
   current flat-script scenarios, not yet built for multi-module import
   graphs.
-- The eval scenario set is small and hand-written, by design disclosed as
-  such rather than dressed up as SWE-bench-scale coverage.
-- `DockerSandbox` isn't exercised by the automated test suite in this repo
-  (no Docker daemon in the CI/sandbox environment it was built in) — the
+- The eval scenario set is small (4 hand-written cases) and doesn't claim
+  SWE-bench-scale coverage.
+- Patch generation asks the model for the full corrected file content
+  rather than a unified diff, since a 7B local model produces malformed
+  diffs often enough that diff application became its own failure mode.
+  This works well for single-file fixes but doesn't extend to multi-file
+  patches yet.
+- On the `ZeroDivisionError` scenario specifically, qwen2.5-coder:7b
+  sometimes reports the file as "already correct" without actually
+  changing it, which reads as the model misjudging its own diff rather
+  than a parsing or pipeline issue — a good candidate for tighter
+  prompting (e.g., explicitly requiring the returned content to differ
+  from the input) in a future pass.
+- `DockerSandbox` isn't yet exercised by the automated test suite (no
+  Docker daemon available in the environment used to build it) — the
   isolation flags are correct Docker semantics but worth a manual smoke
-  test on a machine with Docker before relying on it.
+  test before relying on it in production.
 
 ## Repo layout
 
@@ -142,3 +149,7 @@ evals/
   scenarios/                # 4 hand-written incident scenarios
 tests/                      # unit tests for AST analyzer + sandbox
 ```
+
+## AUTHOR
+
+RAHIM KHAN
