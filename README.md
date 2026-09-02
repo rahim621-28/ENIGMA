@@ -1,12 +1,16 @@
 # ENIGMA
 
-Autonomous incident-triage agent: crash log → AST analysis → sandboxed
-reproduction → LLM-synthesized patch → test verification → RCA report.
+I built ENIGMA to see how far I could push an autonomous debugging agent:
+give it a crash log, and it locates the failing code, reproduces the bug
+in an isolated sandbox, asks an LLM to write a fix, applies and tests
+that fix, and writes up a root cause analysis — end to end, no human in
+the loop until there's a PR to review.
 
-Built as a deterministic **LangGraph** state machine rather than a
-free-form ReAct loop, so it can't hallucinate its way into an infinite
-retry loop — every retry is bounded by `max_retries` and a hard LangGraph
-`recursion_limit` backstop.
+I built it as a deterministic LangGraph state machine instead of a
+free-form ReAct loop on purpose. Free-form agent loops are prone to
+looping forever when a test keeps failing; here every retry is bounded
+by `max_retries`, with a hard LangGraph `recursion_limit` as a backstop
+even if my retry-counting logic ever has a bug.
 
 ## Architecture
 
@@ -17,17 +21,21 @@ Crash Log ──► Ingest ──► AST + Git Blame ──► Hypothesis ──
 ```
 
 - **Orchestration**: LangGraph `StateGraph` with a typed Pydantic v2 state
-  schema (`enigma/graph/state.py`) and a conditional edge that routes
-  back to `patch` only while `retry_count < max_retries`.
+  schema (`enigma/graph/state.py`) and a conditional edge that only
+  routes back to `patch` while `retry_count < max_retries`.
 - **Analysis**: `ast.NodeVisitor`-based symbol extraction
-  (`enigma/analysis/ast_analyzer.py`) plus `git blame` correlation.
-- **Sandbox**: `LocalSandbox` (subprocess isolation, stripped-secrets env,
-  hard timeout) for fast local dev, and `DockerSandbox`
-  (`--network none`, memory/CPU/pids caps, non-root, `--cap-drop ALL`) for
-  adversarial isolation of LLM-generated code.
-- **LLM providers**: Ollama (local, offline, default), Gemini, OpenAI, and
-  a deterministic `mock` provider used by the eval harness to validate
-  pipeline wiring without requiring a live model.
+  (`enigma/analysis/ast_analyzer.py`) plus `git blame` correlation, so
+  the agent can point at the exact function and the commit that
+  introduced it.
+- **Sandbox**: `LocalSandbox` for fast local iteration (subprocess
+  isolation, stripped-secrets env, hard timeout), and `DockerSandbox`
+  (`--network none`, memory/CPU/pids caps, non-root, `--cap-drop ALL`)
+  for real isolation when running LLM-generated code against something
+  I don't fully trust.
+- **LLM providers**: Ollama by default (local, offline, no API costs),
+  with Gemini and OpenAI as drop-in alternatives, plus a deterministic
+  mock provider I use to sanity-check the pipeline wiring without
+  burning model calls.
 
 ## Setup
 
@@ -37,11 +45,11 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -e .
 ```
 
-### Run 100% offline with Ollama (recommended)
+### Running offline with Ollama (my default setup)
 
 ```bash
 ollama pull qwen2.5-coder:7b
-ollama serve   # in a separate terminal, if not already running
+ollama serve   # separate terminal, if it's not already running as a service
 
 export LLM_PROVIDER=ollama
 export MODEL_NAME=qwen2.5-coder:7b
@@ -54,7 +62,7 @@ enigma doctor      # confirms Ollama is reachable and the model responds
 enigma doctor
 ```
 
-### Triage a real incident
+### Triaging a real incident
 
 ```bash
 enigma triage \
@@ -67,39 +75,37 @@ ZeroDivisionError: division by zero' \
   --repo evals/scenarios/scenario_zero_div
 ```
 
-### Run the eval harness
+### Eval harness
 
 ```bash
 enigma eval
 ```
 
-The harness has two modes:
+I run this in two modes. `LLM_PROVIDER=mock` swaps in each scenario's
+known-good fix instead of calling a model — good for a quick check that
+ingest → AST → sandbox repro → patch → test → RCA are all wired up
+correctly. `LLM_PROVIDER=ollama` (or gemini/openai) is the real thing:
+the model generates its own patch, and that's what actually gets applied
+and tested.
 
-- `LLM_PROVIDER=mock` applies each scenario's known-good fixture patch
-  instead of asking a model to generate one. It's a wiring check —
-  confirms ingest → AST → sandbox repro → patch-apply → test → RCA all
-  connect correctly — not a measure of model reasoning.
-- `LLM_PROVIDER=ollama` (or `gemini`/`openai`) has the agent generate its
-  own patch, which is then applied and tested for real. Currently run
-  against 4 hand-written scenarios in `evals/scenarios/`, covering
-  `ZeroDivisionError`, `KeyError`, `IndexError`, and `TypeError` patterns.
-  Pass@1 on qwen2.5-coder:7b is currently 2/4 — the model correctly fixes
-  `IndexError` and `TypeError` cases but struggles with the `KeyError`
-  and `ZeroDivisionError` scenarios (see Known limitations below).
-
-Planned next step: expand the scenario set to 15-20+ cases spanning a
-wider range of bug classes and difficulty levels.
+Right now I'm at Pass@1 of 2/4 on qwen2.5-coder:7b, across 4 hand-written
+scenarios (`ZeroDivisionError`, `KeyError`, `IndexError`, `TypeError`).
+It nails the `IndexError` and `TypeError` cases cleanly. It struggles on
+the other two — more on that below. My next step is growing the scenario
+set to 15-20+ cases across a wider spread of bug types before I put much
+weight on the aggregate number.
 
 ## Deployment
 
-The FastAPI service in `enigma/server/app.py` wraps the same LangGraph
-pipeline behind an HTTP API, with a minimal browser-based demo UI at `/`.
+`enigma/server/app.py` wraps the same pipeline behind a FastAPI service,
+with a small demo page at `/` so it's explorable in a browser.
 
 **Endpoints:**
+
 - `GET /healthz` — liveness check
-- `GET /` — demo UI (paste a traceback, optionally a public repo URL)
+- `GET /` — demo UI
 - `POST /triage` — `{"log": str, "repo_url": Optional[str]}` → runs the
-  full pipeline and returns the RCA report + step log
+  pipeline, returns the RCA report and step log
 
 Run it locally:
 
@@ -108,60 +114,50 @@ pip install -e ".[server]"
 uvicorn enigma.server.app:app --reload
 ```
 
-### Deploying to Render (free tier)
+### Deploying to Render
 
 1. Push this repo to GitHub.
-2. On [dashboard.render.com](https://dashboard.render.com), click **New +** → **Web Service**, and select the repo.
-3. Configure:
-   - **Build Command**: `pip install -e ".[server]"`
-   - **Start Command**: `uvicorn enigma.server.app:app --host 0.0.0.0 --port $PORT`
-   - **Environment Variables**: `LLM_PROVIDER=gemini`, `GEMINI_API_KEY=<your key>`
-4. Deploy. The live app will be at `https://<your-app>.onrender.com`.
+2. On [dashboard.render.com](https://dashboard.render.com): New + → Web Service → select the repo.
+3. Build command: `pip install -e ".[server]"`
+4. Start command: `uvicorn enigma.server.app:app --host 0.0.0.0 --port $PORT`
+5. Env vars: `LLM_PROVIDER=gemini`, `GEMINI_API_KEY=<your key>`
 
-**Ollama isn't viable here** — free hosting tiers don't have the GPU/
-persistent storage a local model needs, so the deployed service uses a
-cloud provider (Gemini or OpenAI) instead. If no API key is configured,
-the service transparently falls back to demo mode: reproduction and AST
-analysis still run for real, but patch generation is skipped and the
-response is labeled accordingly (`demo_mode: true`) rather than the
-request failing outright.
+Ollama doesn't work on free hosting — no GPU, no persistent model
+storage — so the deployed version runs on Gemini or OpenAI instead. If
+no key is configured it falls back to a demo mode automatically:
+reproduction and AST analysis still run for real, patch generation is
+just skipped, and the response says so rather than the request silently
+failing.
 
+## Sandbox notes
 
+`LocalSandbox` runs with the same interpreter as the host process
+(`sys.executable`) and redacts anything with `KEY`, `TOKEN`, `SECRET`,
+`PASSWORD`, or `CREDENTIAL` in the env var name. It's a blast-radius
+reducer, not a real security boundary — for that, `DockerSandbox` is the
+one that actually matters: `--network none`, memory/CPU/pids caps,
+read-only root filesystem, non-root user, all capabilities dropped.
+Select it with `SANDBOX_BACKEND=docker`.
 
-`LocalSandbox` copies the repo into a temp dir and runs with the same
-interpreter as the host process (`sys.executable`), with secret-looking
-env vars (`*KEY*`, `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*CREDENTIAL*`)
-redacted. This reduces blast radius from buggy generated code; it is not
-an adversarial security boundary.
+## What I'd tackle next
 
-`DockerSandbox` is the real isolation layer: `--network none`, memory/CPU/
-pids limits, read-only root filesystem with a tmpfs scratch dir, non-root
-user, and all Linux capabilities dropped. Requires Docker; select it with
-`SANDBOX_BACKEND=docker`.
-
-## Known limitations
-
-- `_build_repro_script` re-runs the whole failing module rather than
-  parsing the traceback's call chain into a minimal repro — works for the
-  current flat-script scenarios, not yet built for multi-module import
-  graphs.
-- The eval scenario set is small (4 hand-written cases) and doesn't claim
-  SWE-bench-scale coverage.
-- Patch generation asks the model for the full corrected file content
-  rather than a unified diff, since a 7B local model produces malformed
-  diffs often enough that diff application became its own failure mode.
-  This works well for single-file fixes but doesn't extend to multi-file
-  patches yet.
-- On the `ZeroDivisionError` scenario specifically, qwen2.5-coder:7b
-  sometimes reports the file as "already correct" without actually
-  changing it, which reads as the model misjudging its own diff rather
-  than a parsing or pipeline issue — a good candidate for tighter
-  prompting (e.g., explicitly requiring the returned content to differ
-  from the input) in a future pass.
-- `DockerSandbox` isn't yet exercised by the automated test suite (no
-  Docker daemon available in the environment used to build it) — the
-  isolation flags are correct Docker semantics but worth a manual smoke
-  test before relying on it in production.
+- The repro step re-runs the whole failing module rather than tracing
+  the actual call chain from the traceback — fine for single-file
+  scenarios, not built out for multi-module import graphs yet.
+- Patch generation asks the model to return the full corrected file
+  rather than a diff. I went this way after a 7B local model kept
+  producing diffs that didn't apply cleanly — full-file replacement
+  turned out to be the more reliable trade for single-file fixes, though
+  it won't scale to multi-file patches as-is.
+- On the `ZeroDivisionError` case specifically, the model sometimes
+  claims the file is "already correct" without actually having changed
+  it — looks like it's misjudging its own output rather than a parsing
+  bug on my end. Worth trying tighter prompting (e.g. explicitly
+  requiring the returned content to differ from the input) to see if
+  that closes the gap.
+- `DockerSandbox` hasn't been exercised by the test suite yet since I
+  built this without a Docker daemon on hand — the isolation flags are
+  correct, but I'd want to smoke test it for real before relying on it.
 
 ## Repo layout
 
@@ -180,8 +176,14 @@ enigma/
     base.py / local_sandbox.py / docker_sandbox.py
   llm/
     ollama_provider.py, cloud_providers.py, mock_provider.py
+  server/
+    app.py                  # FastAPI service + demo UI
 evals/
   runner.py                # eval harness (Pass@1, reproduction rate)
   scenarios/                # 4 hand-written incident scenarios
 tests/                      # unit tests for AST analyzer + sandbox
 ```
+
+## Author
+
+Rahim Khan
