@@ -90,7 +90,43 @@ The harness has two modes:
 Planned next step: expand the scenario set to 15-20+ cases spanning a
 wider range of bug classes and difficulty levels.
 
-## Sandbox isolation notes
+## Deployment
+
+The FastAPI service in `enigma/server/app.py` wraps the same LangGraph
+pipeline behind an HTTP API, with a minimal browser-based demo UI at `/`.
+
+**Endpoints:**
+- `GET /healthz` — liveness check
+- `GET /` — demo UI (paste a traceback, optionally a public repo URL)
+- `POST /triage` — `{"log": str, "repo_url": Optional[str]}` → runs the
+  full pipeline and returns the RCA report + step log
+
+Run it locally:
+
+```bash
+pip install -e ".[server]"
+uvicorn enigma.server.app:app --reload
+```
+
+### Deploying to Render (free tier)
+
+1. Push this repo to GitHub.
+2. On [dashboard.render.com](https://dashboard.render.com), click **New +** → **Web Service**, and select the repo.
+3. Configure:
+   - **Build Command**: `pip install -e ".[server]"`
+   - **Start Command**: `uvicorn enigma.server.app:app --host 0.0.0.0 --port $PORT`
+   - **Environment Variables**: `LLM_PROVIDER=gemini`, `GEMINI_API_KEY=<your key>`
+4. Deploy. The live app will be at `https://<your-app>.onrender.com`.
+
+**Ollama isn't viable here** — free hosting tiers don't have the GPU/
+persistent storage a local model needs, so the deployed service uses a
+cloud provider (Gemini or OpenAI) instead. If no API key is configured,
+the service transparently falls back to demo mode: reproduction and AST
+analysis still run for real, but patch generation is skipped and the
+response is labeled accordingly (`demo_mode: true`) rather than the
+request failing outright.
+
+
 
 `LocalSandbox` copies the repo into a temp dir and runs with the same
 interpreter as the host process (`sys.executable`), with secret-looking
@@ -149,7 +185,3 @@ evals/
   scenarios/                # 4 hand-written incident scenarios
 tests/                      # unit tests for AST analyzer + sandbox
 ```
-
-## AUTHOR
-
-RAHIM KHAN

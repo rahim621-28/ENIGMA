@@ -17,7 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 gemini = ["google-generativeai"]
 openai = ["openai"]
-server = ["fastapi", "uvicorn"]
+server = ["fastapi>=0.110", "uvicorn[standard]>=0.29"]
 dev = ["pytest"]
 
 [project.scripts]
