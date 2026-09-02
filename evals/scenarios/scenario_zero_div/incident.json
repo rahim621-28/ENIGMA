@@ -1,0 +1,5 @@
+{
+  "log": "Traceback (most recent call last):\n  File \"service.py\", line 6, in <module>\n    print(calculate_metrics(100, 0))\n  File \"service.py\", line 2, in calculate_metrics\n    return total / count\nZeroDivisionError: division by zero",
+  "test_command": ["-m", "pytest", "-q"],
+  "fixture_patch_file": "fix.py"
+}

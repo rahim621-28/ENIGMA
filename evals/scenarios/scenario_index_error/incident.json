@@ -1,0 +1,5 @@
+{
+  "log": "Traceback (most recent call last):\n  File \"service.py\", line 5, in <module>\n    print(most_recent_event([]))\n  File \"service.py\", line 2, in most_recent_event\n    return events[-1]\nIndexError: list index out of range",
+  "test_command": ["-m", "pytest", "-q"],
+  "fixture_patch_file": "fix.py"
+}
